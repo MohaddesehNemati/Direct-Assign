@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import math
 from io import BytesIO
 import re
+import hashlib
 
 st.set_page_config(page_title="Unread Threads Summary", layout="wide")
 st.title("خلاصه تردهای خوانده‌نشده (بر اساس Username) + تخمین نیرو + تقسیم بین کارشناسا")
@@ -156,7 +157,7 @@ def process_file(df, upload_time, mapped_cols):
     if unread.empty:
         return None, "هیچ پیام 'خوانده نشده' پیدا نشد."
 
-    # حذف self-thread ها (Account == Username)
+    # حذف self-thread ها
     unread = unread[
         unread.apply(
             lambda r: normalize_id(r["__account__"]) != normalize_id(r["__user__"]),
@@ -173,7 +174,6 @@ def process_file(df, upload_time, mapped_cols):
 
     global_max_dt = max(valid_dts)
 
-    # ⭐ زمان ثابت هر ترد
     work_hours_thread_raw = minutes_per_thread / 60.0
     effective_capacity_per_staff = sla_hours * efficiency
 
@@ -193,7 +193,6 @@ def process_file(df, upload_time, mapped_cols):
         delta_hours = (global_max_dt - newest_dt).total_seconds() / 3600.0
         delta_hours_rounded = round(delta_hours, 1)
 
-        # نیرو برای یک ترد با workload ثابت
         needed_staff = math.ceil(work_hours_thread_raw / effective_capacity_per_staff) if count_unread > 0 else 0
         needed_staff = max(needed_staff, 1) if count_unread > 0 else 0
 
@@ -207,16 +206,13 @@ def process_file(df, upload_time, mapped_cols):
             "Account": account,
             "Username": user,
             "OldestUnreadDate": oldest_date_str,
-            "UnreadCount": count_unread,  # فقط برای اولویت/اطلاع
+            "UnreadCount": count_unread,
             "HoursSinceLastUnread": delta_hours_rounded,
 
-            # ✅ ورک‌لود ثابت هر ترد
             "WorkHours(1thread=Xmin)": round(work_hours_thread_raw, 3),
-
             "NeededStaff(for_SLA)": needed_staff,
             "FinishBy(from_upload_time)": finish_time.strftime("%Y/%m/%d %H:%M"),
 
-            # داخلی برای تقسیم کار
             "WorkHoursRaw": work_hours_thread_raw,
             "OldestUnreadDT": oldest_dt,
         })
@@ -269,6 +265,16 @@ def allocate_threads(result_df, experts_count, sla_hours, efficiency, upload_tim
 # ---------- UI FLOW ----------
 if uploaded_file:
     try:
+        # ✅ ثبت زمان آپلود واقعی و ثابت تا وقتی فایل عوض نشده
+        file_bytes = uploaded_file.getvalue()
+        file_hash = hashlib.md5(file_bytes).hexdigest()
+
+        if st.session_state.get("last_file_hash") != file_hash:
+            st.session_state["last_file_hash"] = file_hash
+            st.session_state["upload_time"] = datetime.now()
+
+        upload_time = st.session_state["upload_time"]
+
         xl = pd.ExcelFile(uploaded_file)
         sheet_names = xl.sheet_names
         sheet = "Message Report" if "Message Report" in sheet_names else sheet_names[0]
@@ -291,7 +297,6 @@ if uploaded_file:
         st.subheader("پیش‌نمایش داده‌ها")
         st.dataframe(df.head(20), use_container_width=True)
 
-        upload_time = datetime.now()
         st.caption(f"زمان آپلود/شروع محاسبه: {upload_time.strftime('%Y/%m/%d %H:%M')}")
 
         result_df, err = process_file(df, upload_time, mapped_cols)
@@ -300,7 +305,6 @@ if uploaded_file:
             st.error(err)
         else:
             st.subheader("خلاصه تردهای خوانده‌نشده (هر Username یک ترد)")
-
             show_summary = result_df.drop(columns=["WorkHoursRaw", "OldestUnreadDT"])
             st.dataframe(show_summary, use_container_width=True)
 
@@ -323,7 +327,6 @@ if uploaded_file:
             st.dataframe(alloc_df, use_container_width=True)
             st.caption(f"پایان کل بک‌لاگ: {overall_finish.strftime('%Y/%m/%d %H:%M')}")
 
-            # دانلود خروجی‌ها
             output = BytesIO()
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
                 show_summary.to_excel(writer, index=False, sheet_name="ThreadSummary")
