@@ -5,9 +5,14 @@ import math
 from io import BytesIO
 import re
 import hashlib
+from zoneinfo import ZoneInfo  # py>=3.9
 
 st.set_page_config(page_title="Unread Threads Summary", layout="wide")
 st.title("خلاصه تردهای خوانده‌نشده (بر اساس Username) + تخمین نیرو + تقسیم بین کارشناسا")
+
+# ---------- تنظیم تایم‌زون ----------
+# اگر می‌خوای ثابت باشه:
+APP_TZ = ZoneInfo("Asia/Tehran")  # ← اینو اگر لازم شد عوض کن
 
 # ---------- Sidebar settings ----------
 with st.sidebar:
@@ -38,7 +43,7 @@ ARABIC_DIGITS  = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
 def normalize_text(x):
     s = "" if pd.isna(x) else str(x)
     s = s.strip().translate(PERSIAN_DIGITS).translate(ARABIC_DIGITS)
-    s = s.replace("\u200c", "")  # ZWNJ
+    s = s.replace("\u200c", "")
     s = re.sub(r"\s+", " ", s)
     return s
 
@@ -137,7 +142,6 @@ def auto_map_columns(df):
         if score <= 0:
             raise ValueError(f"ستون '{std}' اتومات پیدا نشد. ستون‌های فعلی: {cols}")
         mapped[std] = col
-
     return mapped
 
 def process_file(df, upload_time, mapped_cols):
@@ -164,7 +168,6 @@ def process_file(df, upload_time, mapped_cols):
             axis=1
         )
     ].copy()
-
     if unread.empty:
         return None, "بعد از حذف self-threadها، هیچ ترد خوانده‌نشده‌ای باقی نماند."
 
@@ -208,10 +211,9 @@ def process_file(df, upload_time, mapped_cols):
             "OldestUnreadDate": oldest_date_str,
             "UnreadCount": count_unread,
             "HoursSinceLastUnread": delta_hours_rounded,
-
             "WorkHours(1thread=Xmin)": round(work_hours_thread_raw, 3),
             "NeededStaff(for_SLA)": needed_staff,
-            "FinishBy(from_upload_time)": finish_time.strftime("%Y/%m/%d %H:%M"),
+            "FinishBy(from_upload_time)": finish_time.astimezone(APP_TZ).strftime("%Y/%m/%d %H:%M"),
 
             "WorkHoursRaw": work_hours_thread_raw,
             "OldestUnreadDT": oldest_dt,
@@ -253,7 +255,7 @@ def allocate_threads(result_df, experts_count, sla_hours, efficiency, upload_tim
             "AssignedThreads": " , ".join(assigns[i]) if assigns[i] else "-",
             "AssignedThreadCount": len(assigns[i]),
             "WorkHours": round(expert_hours_raw, 2),
-            "FinishBy": finish_time.strftime("%Y/%m/%d %H:%M"),
+            "FinishBy": finish_time.astimezone(APP_TZ).strftime("%Y/%m/%d %H:%M"),
         })
 
     alloc_df = pd.DataFrame(out_rows)
@@ -265,13 +267,13 @@ def allocate_threads(result_df, experts_count, sla_hours, efficiency, upload_tim
 # ---------- UI FLOW ----------
 if uploaded_file:
     try:
-        # ✅ ثبت زمان آپلود واقعی و ثابت تا وقتی فایل عوض نشده
+        # ✅ زمان آپلود واقعی (timezone-aware)
         file_bytes = uploaded_file.getvalue()
         file_hash = hashlib.md5(file_bytes).hexdigest()
 
         if st.session_state.get("last_file_hash") != file_hash:
             st.session_state["last_file_hash"] = file_hash
-            st.session_state["upload_time"] = datetime.now()
+            st.session_state["upload_time"] = datetime.now(APP_TZ)
 
         upload_time = st.session_state["upload_time"]
 
@@ -325,7 +327,7 @@ if uploaded_file:
                 )
 
             st.dataframe(alloc_df, use_container_width=True)
-            st.caption(f"پایان کل بک‌لاگ: {overall_finish.strftime('%Y/%m/%d %H:%M')}")
+            st.caption(f"پایان کل بک‌لاگ: {overall_finish.astimezone(APP_TZ).strftime('%Y/%m/%d %H:%M')}")
 
             output = BytesIO()
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
