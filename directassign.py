@@ -6,7 +6,7 @@ from io import BytesIO
 import re
 
 st.set_page_config(page_title="Unread Summary", layout="wide")
-st.title("خلاصه پیام‌های خوانده‌نشده + تخمین نیرو + تقسیم بین کارشناسا")
+st.title("دشبرد اساین دایرکت به کارشناسان")
 
 # ---------- Sidebar settings ----------
 with st.sidebar:
@@ -254,3 +254,4 @@ if uploaded_file:
 
 else:
     st.info("یک فایل Excel آپلود کنید تا پردازش انجام شود.")
+
