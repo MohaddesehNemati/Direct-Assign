@@ -306,11 +306,11 @@ if uploaded_file:
         if err:
             st.error(err)
         else:
-            st.subheader("خلاصه تردهای خوانده‌نشده (هر Username یک ترد)")
+            st.subheader("خلاصه پیام‌های خوانده‌نشده ")
             show_summary = result_df.drop(columns=["WorkHoursRaw", "OldestUnreadDT"])
             st.dataframe(show_summary, use_container_width=True)
 
-            st.subheader("تقسیم تردها بین کارشناسان")
+            st.subheader("تقسیم پیام‌ها بین کارشناسان")
             alloc_df, feasible, overall_finish, total_work = allocate_threads(
                 result_df, experts_count, sla_hours, efficiency, upload_time
             )
@@ -347,4 +347,5 @@ if uploaded_file:
 
 else:
     st.info("یک فایل Excel آپلود کنید تا پردازش انجام شود.")
+
 
