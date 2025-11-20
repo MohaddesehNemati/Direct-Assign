@@ -11,7 +11,6 @@ st.set_page_config(page_title="Unread Threads Summary", layout="wide")
 st.title("Direct Assignment")
 
 # ---------- تنظیم تایم‌زون ----------
-# اگر می‌خوای ثابت باشه:
 APP_TZ = ZoneInfo("Asia/Tehran")  
 
 # ---------- Sidebar settings ----------
@@ -306,7 +305,18 @@ if uploaded_file:
         if err:
             st.error(err)
         else:
-            st.subheader("خلاصه پیام‌های خوانده‌نشده ")
+            # ✅ شمارنده‌های کل
+            total_threads = len(result_df)
+            total_unread_msgs = int(result_df["UnreadCount"].sum())
+
+            st.subheader("خلاصه پیام‌های خوانده‌نشده")
+
+            c1, c2 = st.columns(2)
+            with c1:
+                st.metric("تعداد کل تردهای خوانده‌نشده", total_threads)
+            with c2:
+                st.metric("تعداد کل پیام‌های خوانده‌نشده", total_unread_msgs)
+
             show_summary = result_df.drop(columns=["WorkHoursRaw", "OldestUnreadDT"])
             st.dataframe(show_summary, use_container_width=True)
 
@@ -347,5 +357,3 @@ if uploaded_file:
 
 else:
     st.info("یک فایل Excel آپلود کنید تا پردازش انجام شود.")
-
-
