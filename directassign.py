@@ -11,8 +11,8 @@ st.title("خلاصه تردهای خوانده‌نشده (بر اساس Usernam
 # ---------- Sidebar settings ----------
 with st.sidebar:
     st.header("تنظیمات")
-    minutes_per_msg = st.number_input(
-        "زمان هر پیام (دقیقه)",
+    minutes_per_thread = st.number_input(
+        "زمان هر ترد (دقیقه)",
         min_value=0.1, value=1.0, step=0.1
     )
     sla_hours = st.number_input(
@@ -48,11 +48,9 @@ def normalize_colname(c):
     return c
 
 def normalize_id(x):
-    """برای مقایسه Account و Username"""
     return normalize_text(x).lower().replace(" ", "")
 
 def parse_custom(val):
-    """پارس تاریخ از حالت‌های متنوع و اعداد فارسی"""
     if pd.isna(val):
         return None
     if isinstance(val, datetime):
@@ -92,7 +90,6 @@ def is_unread(val):
     ]) or s in ["0", "false", "no"]
 
 def guess_header_row(raw_df):
-    """هدر را از بین چند ردیف اول حدس می‌زند"""
     candidates = [
         "account", "اکانت", "نام اکانت", "page", "channel",
         "user", "username", "sender", "from", "contact", "customer",
@@ -106,10 +103,6 @@ def guess_header_row(raw_df):
     return 0
 
 def auto_map_columns(df):
-    """
-    ستون‌ها را به account/date/status/user مپ می‌کند.
-    user اینجا اجباریه.
-    """
     cols = list(df.columns)
     norm_cols = [normalize_colname(c) for c in cols]
 
@@ -157,15 +150,13 @@ def process_file(df, upload_time, mapped_cols):
     df["__date__"] = df[date_col]
     df["__status__"] = df[status_col]
     df["__user__"] = df[user_col]
-
     df["dt"] = df["__date__"].apply(parse_custom)
 
-    # فقط unreadها
     unread = df[df["__status__"].apply(is_unread)].copy()
     if unread.empty:
-        return None, "هیچ پیام 'خوانده نشده' پیدا نشد. مقدارهای Status را چک کنید."
+        return None, "هیچ پیام 'خوانده نشده' پیدا نشد."
 
-    # ⭐ حذف self-thread: جایی که Account == Username
+    # حذف self-thread ها (Account == Username)
     unread = unread[
         unread.apply(
             lambda r: normalize_id(r["__account__"]) != normalize_id(r["__user__"]),
@@ -174,15 +165,18 @@ def process_file(df, upload_time, mapped_cols):
     ].copy()
 
     if unread.empty:
-        return None, "بعد از حذف self-thread ها، هیچ ترد خوانده‌نشده‌ای باقی نماند."
+        return None, "بعد از حذف self-threadها، هیچ ترد خوانده‌نشده‌ای باقی نماند."
 
     valid_dts = [d for d in df["dt"] if d is not None]
     if not valid_dts:
-        return None, "هیچ تاریخ/ساعتی پارس نشد. ستون Date یا فرمتش مشکل دارد."
+        return None, "هیچ تاریخ/ساعتی پارس نشد."
 
     global_max_dt = max(valid_dts)
 
-    # ⭐ ترد = Account + Username
+    # ⭐ زمان ثابت هر ترد
+    work_hours_thread_raw = minutes_per_thread / 60.0
+    effective_capacity_per_staff = sla_hours * efficiency
+
     rows = []
     for (account, user), g in unread.groupby(["__account__", "__user__"]):
         dts = [d for d in g["dt"] if d is not None]
@@ -199,13 +193,11 @@ def process_file(df, upload_time, mapped_cols):
         delta_hours = (global_max_dt - newest_dt).total_seconds() / 3600.0
         delta_hours_rounded = round(delta_hours, 1)
 
-        work_hours_raw = (count_unread * minutes_per_msg) / 60.0
-        effective_capacity_per_staff = sla_hours * efficiency
-
-        needed_staff = math.ceil(work_hours_raw / effective_capacity_per_staff) if count_unread > 0 else 0
+        # نیرو برای یک ترد با workload ثابت
+        needed_staff = math.ceil(work_hours_thread_raw / effective_capacity_per_staff) if count_unread > 0 else 0
         needed_staff = max(needed_staff, 1) if count_unread > 0 else 0
 
-        duration_hours = (work_hours_raw / (needed_staff * efficiency)) if needed_staff > 0 else 0.0
+        duration_hours = (work_hours_thread_raw / (needed_staff * efficiency)) if needed_staff > 0 else 0.0
         finish_time = upload_time + timedelta(hours=duration_hours)
 
         thread_key = f"{account} | {user}"
@@ -215,27 +207,26 @@ def process_file(df, upload_time, mapped_cols):
             "Account": account,
             "Username": user,
             "OldestUnreadDate": oldest_date_str,
-            "UnreadCount": count_unread,
+            "UnreadCount": count_unread,  # فقط برای اولویت/اطلاع
             "HoursSinceLastUnread": delta_hours_rounded,
-            "WorkHours(1msg=1min)": round(work_hours_raw, 2),
+
+            # ✅ ورک‌لود ثابت هر ترد
+            "WorkHours(1thread=Xmin)": round(work_hours_thread_raw, 3),
+
             "NeededStaff(for_SLA)": needed_staff,
             "FinishBy(from_upload_time)": finish_time.strftime("%Y/%m/%d %H:%M"),
 
-            # داخلی
-            "WorkHoursRaw": work_hours_raw,
+            # داخلی برای تقسیم کار
+            "WorkHoursRaw": work_hours_thread_raw,
             "OldestUnreadDT": oldest_dt,
         })
 
-    result_df = pd.DataFrame(rows).sort_values("HoursSinceLastUnread", ascending=False)
+    result_df = pd.DataFrame(rows).sort_values(
+        ["OldestUnreadDT", "UnreadCount"], ascending=[True, False]
+    )
     return result_df, None
 
 def allocate_threads(result_df, experts_count, sla_hours, efficiency, upload_time):
-    """
-    تقسیم «تردها» بین کارشناسا:
-    - اولویت: قدیمی‌ترین unread سپس unread بیشتر
-    - گرِیدی روی کمترین لود
-    - پایان کل = کندترین کارشناس
-    """
     work_df = result_df.copy().sort_values(
         by=["OldestUnreadDT", "UnreadCount"],
         ascending=[True, False]
