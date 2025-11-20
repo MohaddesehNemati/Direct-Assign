@@ -5,8 +5,8 @@ import math
 from io import BytesIO
 import re
 
-st.set_page_config(page_title="Unread Summary", layout="wide")
-st.title("Direct Assignment Dashboard (Auto)")
+st.set_page_config(page_title="Unread Threads Summary", layout="wide")
+st.title("خلاصه تردهای خوانده‌نشده + تخمین نیرو + تقسیم بین کارشناسا (Auto)")
 
 # ---------- Sidebar settings ----------
 with st.sidebar:
@@ -90,7 +90,7 @@ def is_unread(val):
 def guess_header_row(raw_df):
     """هدر را از بین چند ردیف اول حدس می‌زند"""
     candidates = [
-        "account", "اکانت", "نام اکانت", "user", "page",
+        "account", "اکانت", "نام اکانت", "user", "from", "sender", "customer",
         "date", "تاریخ", "زمان", "datetime", "time",
         "status", "وضعیت", "state", "read", "unread"
     ]
@@ -102,16 +102,18 @@ def guess_header_row(raw_df):
 
 def auto_map_columns(df):
     """
-    ستون‌ها را به account/date/status مپ می‌کند.
-    اگر نتواند یک ستون را پیدا کند، خطا می‌دهد.
+    ستون‌ها را به account/date/status/user مپ می‌کند.
+    user اگر پیدا نشد None می‌ماند.
     """
     cols = list(df.columns)
     norm_cols = [normalize_colname(c) for c in cols]
 
     synonyms = {
-        "account": ["account", "acc", "page", "user", "اکانت", "نام اکانت", "کانال", "پیج", "ادمین"],
+        "account": ["account", "acc", "page", "channel", "user account", "اکانت", "نام اکانت", "کانال", "پیج", "ادمین"],
         "date": ["date", "datetime", "time", "timestamp", "created", "تاریخ", "زمان", "ساعت", "تایم"],
         "status": ["status", "state", "read status", "delivery", "وضعیت", "خوانده", "unread", "seen"],
+        # ⭐ ستون یوزر/فرستنده
+        "user": ["user", "username", "sender", "from", "contact", "customer", "client", "نام کاربر", "کاربر", "فرستنده", "مشتری", "یوزر", "آیدی"],
     }
 
     def best_match(std_key):
@@ -131,11 +133,16 @@ def auto_map_columns(df):
         return best_score, cols[best_idx]
 
     mapped = {}
+    # این سه تا باید حتما پیدا شن
     for std in ["account", "date", "status"]:
         score, col = best_match(std)
         if score <= 0:
             raise ValueError(f"ستون '{std}' اتومات پیدا نشد. ستون‌های فعلی: {cols}")
         mapped[std] = col
+
+    # user اختیاریه
+    user_score, user_col = best_match("user")
+    mapped["user"] = user_col if user_score > 0 else None
 
     return mapped
 
@@ -143,11 +150,13 @@ def process_file(df, upload_time, mapped_cols):
     account_col = mapped_cols["account"]
     date_col    = mapped_cols["date"]
     status_col  = mapped_cols["status"]
+    user_col    = mapped_cols["user"]  # ممکنه None باشه
 
     df = df.copy()
     df["__account__"] = df[account_col]
     df["__date__"] = df[date_col]
     df["__status__"] = df[status_col]
+    df["__user__"] = df[user_col] if user_col else "UNKNOWN_USER"
 
     df["dt"] = df["__date__"].apply(parse_custom)
 
@@ -161,8 +170,9 @@ def process_file(df, upload_time, mapped_cols):
 
     global_max_dt = max(valid_dts)
 
+    # ⭐ گروه‌بندی بر اساس ترد: Account + User
     rows = []
-    for account, g in unread.groupby("__account__"):
+    for (account, user), g in unread.groupby(["__account__", "__user__"]):
         dts = [d for d in g["dt"] if d is not None]
         if not dts:
             continue
@@ -174,11 +184,9 @@ def process_file(df, upload_time, mapped_cols):
         oldest_row = g.loc[g["dt"] == oldest_dt].iloc[0]
         oldest_date_str = str(oldest_row["__date__"])
 
-        # اختلاف ساعت از آخرین unread تا جدیدترین پیام کل فایل
         delta_hours = (global_max_dt - newest_dt).total_seconds() / 3600.0
         delta_hours_rounded = round(delta_hours, 1)
 
-        # ---------- محاسبات نیرو (خام و درست) ----------
         work_hours_raw = (count_unread * minutes_per_msg) / 60.0
         effective_capacity_per_staff = sla_hours * efficiency
 
@@ -188,19 +196,21 @@ def process_file(df, upload_time, mapped_cols):
         duration_hours = (work_hours_raw / (needed_staff * efficiency)) if needed_staff > 0 else 0.0
         finish_time = upload_time + timedelta(hours=duration_hours)
 
+        # ThreadKey برای تخصیص
+        thread_key = f"{account} | {user}"
+
         rows.append({
+            "ThreadKey": thread_key,
             "Account": account,
+            "User": user,
             "OldestUnreadDate": oldest_date_str,
             "UnreadCount": count_unread,
             "HoursSinceLastUnread": delta_hours_rounded,
-
-            # ✅ ورک‌لود رو نگه می‌داریم
             "WorkHours(1msg=1min)": round(work_hours_raw, 2),
-
             "NeededStaff(for_SLA)": needed_staff,
             "FinishBy(from_upload_time)": finish_time.strftime("%Y/%m/%d %H:%M"),
 
-            # داخلی برای تقسیم کار
+            # داخلی
             "WorkHoursRaw": work_hours_raw,
             "OldestUnreadDT": oldest_dt,
         })
@@ -210,10 +220,8 @@ def process_file(df, upload_time, mapped_cols):
 
 def allocate_accounts(result_df, experts_count, sla_hours, efficiency, upload_time):
     """
-    تقسیم اکانت‌ها بین کارشناسا:
-    - اولویت: قدیمی‌ترین unread بعد تعداد unread
-    - سپس گرِیدی روی کمترین لود
-    - پایان کل = کندترین کارشناس
+    تقسیم «تردها» بین کارشناسا.
+    اولویت: قدیمی‌ترین unread سپس unread بیشتر
     """
     work_df = result_df.copy().sort_values(
         by=["OldestUnreadDT", "UnreadCount"],
@@ -225,8 +233,8 @@ def allocate_accounts(result_df, experts_count, sla_hours, efficiency, upload_ti
 
     for _, row in work_df.iterrows():
         idx = loads.index(min(loads))
-        assigns[idx].append(row["Account"])
-        loads[idx] += float(row["WorkHoursRaw"])  # خام
+        assigns[idx].append(row["ThreadKey"])
+        loads[idx] += float(row["WorkHoursRaw"])
 
     total_work_raw = work_df["WorkHoursRaw"].sum()
     feasible = total_work_raw <= experts_count * sla_hours * efficiency
@@ -242,12 +250,9 @@ def allocate_accounts(result_df, experts_count, sla_hours, efficiency, upload_ti
 
         out_rows.append({
             "Expert": f"کارشناس {i+1}",
-            "AssignedAccounts": " , ".join(assigns[i]) if assigns[i] else "-",
-            "AssignedAccountCount": len(assigns[i]),
-
-            # ✅ ورک‌لود هر کارشناس
+            "AssignedThreads": " , ".join(assigns[i]) if assigns[i] else "-",
+            "AssignedThreadCount": len(assigns[i]),
             "WorkHours": round(expert_hours_raw, 2),
-
             "FinishBy": finish_time.strftime("%Y/%m/%d %H:%M"),
         })
 
@@ -267,17 +272,22 @@ if uploaded_file:
 
         raw_preview = pd.read_excel(xl, sheet_name=sheet, header=None)
         header_row = guess_header_row(raw_preview)
-
         df = pd.read_excel(xl, sheet_name=sheet, header=header_row)
-        st.caption(f"هدر (اتومات) از רدیف {header_row+1} تشخیص داده شد.")
+        st.caption(f"هدر (اتومات) از ردیف {header_row+1} تشخیص داده شد.")
 
         mapped_cols = auto_map_columns(df)
+
         st.info(
             f"مپ اتومات ستون‌ها: "
             f"Account ← `{mapped_cols['account']}` | "
             f"Date ← `{mapped_cols['date']}` | "
             f"Status ← `{mapped_cols['status']}`"
         )
+
+        if mapped_cols["user"]:
+            st.info(f"ستون یوزر (ترد) ← `{mapped_cols['user']}`")
+        else:
+            st.warning("ستون یوزر پیدا نشد؛ تردها با Account ساخته می‌شوند. اگر نام ستون خاصی داری بگو تا به synonyms اضافه کنم.")
 
         st.subheader("پیش‌نمایش داده‌ها")
         st.dataframe(df.head(20), use_container_width=True)
@@ -290,12 +300,12 @@ if uploaded_file:
         if err:
             st.error(err)
         else:
-            st.subheader("خلاصه خوانده‌نشده‌ها (به‌ازای هر اکانت)")
+            st.subheader("خلاصه تردهای خوانده‌نشده (Account + User)")
 
             show_summary = result_df.drop(columns=["WorkHoursRaw", "OldestUnreadDT"])
             st.dataframe(show_summary, use_container_width=True)
 
-            st.subheader("تقسیم اکانت‌ها بین کارشناسا")
+            st.subheader("تقسیم تردها بین کارشناسا")
             alloc_df, feasible, overall_finish, total_work = allocate_accounts(
                 result_df, experts_count, sla_hours, efficiency, upload_time
             )
@@ -317,14 +327,14 @@ if uploaded_file:
             # دانلود خروجی‌ها
             output = BytesIO()
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                show_summary.to_excel(writer, index=False, sheet_name="UnreadSummary")
+                show_summary.to_excel(writer, index=False, sheet_name="ThreadSummary")
                 alloc_df.to_excel(writer, index=False, sheet_name="Allocation")
             output.seek(0)
 
             st.download_button(
                 "دانلود خروجی Excel (Summary + Allocation)",
                 data=output,
-                file_name="unread_summary_with_allocation.xlsx",
+                file_name="unread_threads_summary.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
