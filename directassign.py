@@ -8,11 +8,11 @@ import hashlib
 from zoneinfo import ZoneInfo  # py>=3.9
 
 st.set_page_config(page_title="Unread Threads Summary", layout="wide")
-st.title("خلاصه تردهای خوانده‌نشده (بر اساس Username) + تخمین نیرو + تقسیم بین کارشناسا")
+st.title("Direct Assignment")
 
 # ---------- تنظیم تایم‌زون ----------
 # اگر می‌خوای ثابت باشه:
-APP_TZ = ZoneInfo("Asia/Tehran")  # ← اینو اگر لازم شد عوض کن
+APP_TZ = ZoneInfo("Asia/Tehran")  
 
 # ---------- Sidebar settings ----------
 with st.sidebar:
@@ -173,7 +173,7 @@ def process_file(df, upload_time, mapped_cols):
 
     valid_dts = [d for d in df["dt"] if d is not None]
     if not valid_dts:
-        return None, "هیچ تاریخ/ساعتی پارس نشد."
+        return None, "هیچ تاریخ/ساعتی شناسایی نشد."
 
     global_max_dt = max(valid_dts)
 
@@ -310,7 +310,7 @@ if uploaded_file:
             show_summary = result_df.drop(columns=["WorkHoursRaw", "OldestUnreadDT"])
             st.dataframe(show_summary, use_container_width=True)
 
-            st.subheader("تقسیم تردها بین کارشناسا")
+            st.subheader("تقسیم تردها بین کارشناسان")
             alloc_df, feasible, overall_finish, total_work = allocate_threads(
                 result_df, experts_count, sla_hours, efficiency, upload_time
             )
@@ -347,3 +347,4 @@ if uploaded_file:
 
 else:
     st.info("یک فایل Excel آپلود کنید تا پردازش انجام شود.")
+
