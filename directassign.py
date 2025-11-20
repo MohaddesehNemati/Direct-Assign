@@ -181,6 +181,7 @@ def process_file(df, upload_time, mapped_cols):
         # ---------- محاسبات نیرو (خام و درست) ----------
         work_hours_raw = (count_unread * minutes_per_msg) / 60.0
         effective_capacity_per_staff = sla_hours * efficiency
+
         needed_staff = math.ceil(work_hours_raw / effective_capacity_per_staff) if count_unread > 0 else 0
         needed_staff = max(needed_staff, 1) if count_unread > 0 else 0
 
@@ -192,10 +193,14 @@ def process_file(df, upload_time, mapped_cols):
             "OldestUnreadDate": oldest_date_str,
             "UnreadCount": count_unread,
             "HoursSinceLastUnread": delta_hours_rounded,
+
+            # ✅ ورک‌لود رو نگه می‌داریم
+            "WorkHours(1msg=1min)": round(work_hours_raw, 2),
+
             "NeededStaff(for_SLA)": needed_staff,
             "FinishBy(from_upload_time)": finish_time.strftime("%Y/%m/%d %H:%M"),
 
-            # داخلی برای تقسیم کار (نمایش/اکسل نمی‌شود)
+            # داخلی برای تقسیم کار
             "WorkHoursRaw": work_hours_raw,
             "OldestUnreadDT": oldest_dt,
         })
@@ -239,13 +244,17 @@ def allocate_accounts(result_df, experts_count, sla_hours, efficiency, upload_ti
             "Expert": f"کارشناس {i+1}",
             "AssignedAccounts": " , ".join(assigns[i]) if assigns[i] else "-",
             "AssignedAccountCount": len(assigns[i]),
+
+            # ✅ ورک‌لود هر کارشناس
+            "WorkHours": round(expert_hours_raw, 2),
+
             "FinishBy": finish_time.strftime("%Y/%m/%d %H:%M"),
         })
 
     alloc_df = pd.DataFrame(out_rows)
     overall_finish = upload_time + timedelta(hours=max(durations) if durations else 0.0)
 
-    return alloc_df, feasible, overall_finish
+    return alloc_df, feasible, overall_finish, round(total_work_raw, 2)
 
 
 # ---------- UI FLOW ----------
@@ -260,7 +269,7 @@ if uploaded_file:
         header_row = guess_header_row(raw_preview)
 
         df = pd.read_excel(xl, sheet_name=sheet, header=header_row)
-        st.caption(f"هدر (اتومات) از ردیف {header_row+1} تشخیص داده شد.")
+        st.caption(f"هدر (اتومات) از רدیف {header_row+1} تشخیص داده شد.")
 
         mapped_cols = auto_map_columns(df)
         st.info(
@@ -283,24 +292,29 @@ if uploaded_file:
         else:
             st.subheader("خلاصه خوانده‌نشده‌ها (به‌ازای هر اکانت)")
 
-            # فقط ستون‌های قابل نمایش
             show_summary = result_df.drop(columns=["WorkHoursRaw", "OldestUnreadDT"])
             st.dataframe(show_summary, use_container_width=True)
 
             st.subheader("تقسیم اکانت‌ها بین کارشناسا")
-            alloc_df, feasible, overall_finish = allocate_accounts(
+            alloc_df, feasible, overall_finish, total_work = allocate_accounts(
                 result_df, experts_count, sla_hours, efficiency, upload_time
             )
 
             if feasible:
-                st.success(f"با {experts_count} کارشناس، رسیدن به SLA={sla_hours} ساعت ممکنه.")
+                st.success(
+                    f"کل ورک‌لود: {total_work} ساعت | "
+                    f"با {experts_count} کارشناس، رسیدن به SLA={sla_hours} ساعت ممکنه."
+                )
             else:
-                st.warning(f"با {experts_count} کارشناس، تا SLA={sla_hours} ساعت تموم نمی‌شه.")
+                st.warning(
+                    f"کل ورک‌لود: {total_work} ساعت | "
+                    f"با {experts_count} کارشناس، تا SLA={sla_hours} ساعت تموم نمی‌شه."
+                )
 
             st.dataframe(alloc_df, use_container_width=True)
             st.caption(f"پایان کل بک‌لاگ: {overall_finish.strftime('%Y/%m/%d %H:%M')}")
 
-            # دانلود خروجی‌ها (بدون ستون‌های زمان/دقیقه)
+            # دانلود خروجی‌ها
             output = BytesIO()
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
                 show_summary.to_excel(writer, index=False, sheet_name="UnreadSummary")
