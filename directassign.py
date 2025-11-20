@@ -185,7 +185,7 @@ if uploaded_file:
         sheet = st.selectbox("شیت را انتخاب کنید", sheet_names)
 
         raw_preview = pd.read_excel(xl, sheet_name=sheet, header=None)
-        st.subheader("پیش‌نمایش خام (برای پیدا کردن ردیف هدر)")
+        st.subheader("پیش‌نمایش خام")
         st.dataframe(raw_preview.head(15), use_container_width=True)
 
         header_row = st.number_input(
@@ -217,7 +217,7 @@ if uploaded_file:
             st.dataframe(result_df.drop(columns=["OldestUnreadDT"]), use_container_width=True)
 
             # -------- Allocation --------
-            st.subheader("تقسیم اکانت‌ها بین کارشناسا")
+            st.subheader("تقسیم اکانت‌ها بین کارشناسان")
             alloc_df, feasible, total_work = allocate_accounts(
                 result_df, experts_count, sla_hours, efficiency, upload_time
             )
@@ -254,4 +254,5 @@ if uploaded_file:
 
 else:
     st.info("یک فایل Excel آپلود کنید تا پردازش انجام شود.")
+
 
