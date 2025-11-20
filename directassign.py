@@ -6,7 +6,7 @@ from io import BytesIO
 import re
 
 st.set_page_config(page_title="Unread Threads Summary", layout="wide")
-st.title("خلاصه تردهای خوانده‌نشده + تخمین نیرو + تقسیم بین کارشناسا (Auto)")
+st.title("خلاصه تردهای خوانده‌نشده (بر اساس Username) + تخمین نیرو + تقسیم بین کارشناسا")
 
 # ---------- Sidebar settings ----------
 with st.sidebar:
@@ -46,6 +46,10 @@ def normalize_colname(c):
     c = c.replace(":", "").replace("-", " ").replace("_", " ")
     c = re.sub(r"\s+", " ", c).strip()
     return c
+
+def normalize_id(x):
+    """برای مقایسه Account و Username"""
+    return normalize_text(x).lower().replace(" ", "")
 
 def parse_custom(val):
     """پارس تاریخ از حالت‌های متنوع و اعداد فارسی"""
@@ -90,7 +94,8 @@ def is_unread(val):
 def guess_header_row(raw_df):
     """هدر را از بین چند ردیف اول حدس می‌زند"""
     candidates = [
-        "account", "اکانت", "نام اکانت", "user", "from", "sender", "customer",
+        "account", "اکانت", "نام اکانت", "page", "channel",
+        "user", "username", "sender", "from", "contact", "customer",
         "date", "تاریخ", "زمان", "datetime", "time",
         "status", "وضعیت", "state", "read", "unread"
     ]
@@ -103,7 +108,7 @@ def guess_header_row(raw_df):
 def auto_map_columns(df):
     """
     ستون‌ها را به account/date/status/user مپ می‌کند.
-    user اگر پیدا نشد None می‌ماند.
+    user اینجا اجباریه.
     """
     cols = list(df.columns)
     norm_cols = [normalize_colname(c) for c in cols]
@@ -112,8 +117,8 @@ def auto_map_columns(df):
         "account": ["account", "acc", "page", "channel", "user account", "اکانت", "نام اکانت", "کانال", "پیج", "ادمین"],
         "date": ["date", "datetime", "time", "timestamp", "created", "تاریخ", "زمان", "ساعت", "تایم"],
         "status": ["status", "state", "read status", "delivery", "وضعیت", "خوانده", "unread", "seen"],
-        # ⭐ ستون یوزر/فرستنده
-        "user": ["user", "username", "sender", "from", "contact", "customer", "client", "نام کاربر", "کاربر", "فرستنده", "مشتری", "یوزر", "آیدی"],
+        "user": ["user", "username", "sender", "from", "contact", "customer", "client",
+                 "نام کاربر", "کاربر", "فرستنده", "مشتری", "یوزر", "آیدی", "visitor"],
     }
 
     def best_match(std_key):
@@ -133,16 +138,11 @@ def auto_map_columns(df):
         return best_score, cols[best_idx]
 
     mapped = {}
-    # این سه تا باید حتما پیدا شن
-    for std in ["account", "date", "status"]:
+    for std in ["account", "date", "status", "user"]:
         score, col = best_match(std)
         if score <= 0:
             raise ValueError(f"ستون '{std}' اتومات پیدا نشد. ستون‌های فعلی: {cols}")
         mapped[std] = col
-
-    # user اختیاریه
-    user_score, user_col = best_match("user")
-    mapped["user"] = user_col if user_score > 0 else None
 
     return mapped
 
@@ -150,19 +150,31 @@ def process_file(df, upload_time, mapped_cols):
     account_col = mapped_cols["account"]
     date_col    = mapped_cols["date"]
     status_col  = mapped_cols["status"]
-    user_col    = mapped_cols["user"]  # ممکنه None باشه
+    user_col    = mapped_cols["user"]
 
     df = df.copy()
     df["__account__"] = df[account_col]
     df["__date__"] = df[date_col]
     df["__status__"] = df[status_col]
-    df["__user__"] = df[user_col] if user_col else "UNKNOWN_USER"
+    df["__user__"] = df[user_col]
 
     df["dt"] = df["__date__"].apply(parse_custom)
 
+    # فقط unreadها
     unread = df[df["__status__"].apply(is_unread)].copy()
     if unread.empty:
         return None, "هیچ پیام 'خوانده نشده' پیدا نشد. مقدارهای Status را چک کنید."
+
+    # ⭐ حذف self-thread: جایی که Account == Username
+    unread = unread[
+        unread.apply(
+            lambda r: normalize_id(r["__account__"]) != normalize_id(r["__user__"]),
+            axis=1
+        )
+    ].copy()
+
+    if unread.empty:
+        return None, "بعد از حذف self-thread ها، هیچ ترد خوانده‌نشده‌ای باقی نماند."
 
     valid_dts = [d for d in df["dt"] if d is not None]
     if not valid_dts:
@@ -170,7 +182,7 @@ def process_file(df, upload_time, mapped_cols):
 
     global_max_dt = max(valid_dts)
 
-    # ⭐ گروه‌بندی بر اساس ترد: Account + User
+    # ⭐ ترد = Account + Username
     rows = []
     for (account, user), g in unread.groupby(["__account__", "__user__"]):
         dts = [d for d in g["dt"] if d is not None]
@@ -196,13 +208,12 @@ def process_file(df, upload_time, mapped_cols):
         duration_hours = (work_hours_raw / (needed_staff * efficiency)) if needed_staff > 0 else 0.0
         finish_time = upload_time + timedelta(hours=duration_hours)
 
-        # ThreadKey برای تخصیص
         thread_key = f"{account} | {user}"
 
         rows.append({
             "ThreadKey": thread_key,
             "Account": account,
-            "User": user,
+            "Username": user,
             "OldestUnreadDate": oldest_date_str,
             "UnreadCount": count_unread,
             "HoursSinceLastUnread": delta_hours_rounded,
@@ -218,10 +229,12 @@ def process_file(df, upload_time, mapped_cols):
     result_df = pd.DataFrame(rows).sort_values("HoursSinceLastUnread", ascending=False)
     return result_df, None
 
-def allocate_accounts(result_df, experts_count, sla_hours, efficiency, upload_time):
+def allocate_threads(result_df, experts_count, sla_hours, efficiency, upload_time):
     """
-    تقسیم «تردها» بین کارشناسا.
-    اولویت: قدیمی‌ترین unread سپس unread بیشتر
+    تقسیم «تردها» بین کارشناسا:
+    - اولویت: قدیمی‌ترین unread سپس unread بیشتر
+    - گرِیدی روی کمترین لود
+    - پایان کل = کندترین کارشناس
     """
     work_df = result_df.copy().sort_values(
         by=["OldestUnreadDT", "UnreadCount"],
@@ -276,18 +289,13 @@ if uploaded_file:
         st.caption(f"هدر (اتومات) از ردیف {header_row+1} تشخیص داده شد.")
 
         mapped_cols = auto_map_columns(df)
-
         st.info(
             f"مپ اتومات ستون‌ها: "
             f"Account ← `{mapped_cols['account']}` | "
+            f"Username ← `{mapped_cols['user']}` | "
             f"Date ← `{mapped_cols['date']}` | "
             f"Status ← `{mapped_cols['status']}`"
         )
-
-        if mapped_cols["user"]:
-            st.info(f"ستون یوزر (ترد) ← `{mapped_cols['user']}`")
-        else:
-            st.warning("ستون یوزر پیدا نشد؛ تردها با Account ساخته می‌شوند. اگر نام ستون خاصی داری بگو تا به synonyms اضافه کنم.")
 
         st.subheader("پیش‌نمایش داده‌ها")
         st.dataframe(df.head(20), use_container_width=True)
@@ -300,13 +308,13 @@ if uploaded_file:
         if err:
             st.error(err)
         else:
-            st.subheader("خلاصه تردهای خوانده‌نشده (Account + User)")
+            st.subheader("خلاصه تردهای خوانده‌نشده (هر Username یک ترد)")
 
             show_summary = result_df.drop(columns=["WorkHoursRaw", "OldestUnreadDT"])
             st.dataframe(show_summary, use_container_width=True)
 
             st.subheader("تقسیم تردها بین کارشناسا")
-            alloc_df, feasible, overall_finish, total_work = allocate_accounts(
+            alloc_df, feasible, overall_finish, total_work = allocate_threads(
                 result_df, experts_count, sla_hours, efficiency, upload_time
             )
 
