@@ -11,7 +11,7 @@ st.set_page_config(page_title="Unread Threads Summary", layout="wide")
 st.title("Direct Assignment")
 
 # ---------- تنظیم تایم‌زون ----------
-APP_TZ = ZoneInfo("Asia/Tehran")  
+APP_TZ = ZoneInfo("Asia/Tehran")
 
 # ---------- Sidebar settings ----------
 with st.sidebar:
@@ -39,6 +39,7 @@ uploaded_file = st.file_uploader("فایل Excel را آپلود کنید", type
 PERSIAN_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
 ARABIC_DIGITS  = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
 
+
 def normalize_text(x):
     s = "" if pd.isna(x) else str(x)
     s = s.strip().translate(PERSIAN_DIGITS).translate(ARABIC_DIGITS)
@@ -46,14 +47,17 @@ def normalize_text(x):
     s = re.sub(r"\s+", " ", s)
     return s
 
+
 def normalize_colname(c):
     c = normalize_text(c).lower()
     c = c.replace(":", "").replace("-", " ").replace("_", " ")
     c = re.sub(r"\s+", " ", c).strip()
     return c
 
+
 def normalize_id(x):
     return normalize_text(x).lower().replace(" ", "")
+
 
 def parse_custom(val):
     if pd.isna(val):
@@ -88,11 +92,13 @@ def parse_custom(val):
     except Exception:
         return None
 
+
 def is_unread(val):
     s = normalize_text(val).lower()
     return any(k in s for k in [
         "خوانده نشده", "خوانده‌نشده", "unread", "not read", "new"
     ]) or s in ["0", "false", "no"]
+
 
 def guess_header_row(raw_df):
     candidates = [
@@ -106,6 +112,7 @@ def guess_header_row(raw_df):
         if any(any(cand in cell for cand in candidates) for cell in row):
             return i
     return 0
+
 
 def auto_map_columns(df):
     cols = list(df.columns)
@@ -143,6 +150,7 @@ def auto_map_columns(df):
         mapped[std] = col
     return mapped
 
+
 def process_file(df, upload_time, mapped_cols):
     account_col = mapped_cols["account"]
     date_col    = mapped_cols["date"]
@@ -160,7 +168,7 @@ def process_file(df, upload_time, mapped_cols):
     if unread.empty:
         return None, "هیچ پیام 'خوانده نشده' پیدا نشد."
 
-    # حذف self-thread ها
+    # حذف self-thread ها (Account == Username)
     unread = unread[
         unread.apply(
             lambda r: normalize_id(r["__account__"]) != normalize_id(r["__user__"]),
@@ -176,6 +184,7 @@ def process_file(df, upload_time, mapped_cols):
 
     global_max_dt = max(valid_dts)
 
+    # زمان ثابت برای هر ترد
     work_hours_thread_raw = minutes_per_thread / 60.0
     effective_capacity_per_staff = sla_hours * efficiency
 
@@ -214,27 +223,34 @@ def process_file(df, upload_time, mapped_cols):
             "NeededStaff(for_SLA)": needed_staff,
             "FinishBy(from_upload_time)": finish_time.astimezone(APP_TZ).strftime("%Y/%m/%d %H:%M"),
 
+            # داخلی
             "WorkHoursRaw": work_hours_thread_raw,
             "OldestUnreadDT": oldest_dt,
         })
 
     result_df = pd.DataFrame(rows).sort_values(
-        ["OldestUnreadDT", "UnreadCount"], ascending=[True, False]
+        ["OldestUnreadDT", "UnreadCount"],
+        ascending=[True, False]
     )
     return result_df, None
 
+
 def allocate_threads(result_df, experts_count, sla_hours, efficiency, upload_time):
+    """
+    تقسیم تردها بین کارشناسا (گرِیدی روی کمترین لود)
+    ولی خروجی فقط Account ها رو نمایش می‌ده.
+    """
     work_df = result_df.copy().sort_values(
         by=["OldestUnreadDT", "UnreadCount"],
         ascending=[True, False]
     ).reset_index(drop=True)
 
     loads = [0.0 for _ in range(experts_count)]
-    assigns = [[] for _ in range(experts_count)]
+    assigns_threads = [[] for _ in range(experts_count)]  # thread_key
 
     for _, row in work_df.iterrows():
         idx = loads.index(min(loads))
-        assigns[idx].append(row["ThreadKey"])
+        assigns_threads[idx].append(row["ThreadKey"])
         loads[idx] += float(row["WorkHoursRaw"])
 
     total_work_raw = work_df["WorkHoursRaw"].sum()
@@ -242,6 +258,7 @@ def allocate_threads(result_df, experts_count, sla_hours, efficiency, upload_tim
 
     out_rows = []
     durations = []
+
     for i in range(experts_count):
         expert_hours_raw = loads[i]
         duration_hours = expert_hours_raw / efficiency if efficiency > 0 else 0.0
@@ -249,10 +266,18 @@ def allocate_threads(result_df, experts_count, sla_hours, efficiency, upload_tim
 
         finish_time = upload_time + timedelta(hours=duration_hours)
 
+        # فقط Account ها از ThreadKey
+        accounts = []
+        for tk in assigns_threads[i]:
+            acc = str(tk).split("|")[0].strip()
+            if acc and acc not in accounts:
+                accounts.append(acc)
+
         out_rows.append({
             "Expert": f"کارشناس {i+1}",
-            "AssignedThreads": " , ".join(assigns[i]) if assigns[i] else "-",
-            "AssignedThreadCount": len(assigns[i]),
+            "AssignedAccounts": " , ".join(accounts) if accounts else "-",
+            "AssignedAccountCount": len(accounts),
+            "AssignedThreadCount": len(assigns_threads[i]),  # برای اطلاع، حذفش نکنیم
             "WorkHours": round(expert_hours_raw, 2),
             "FinishBy": finish_time.astimezone(APP_TZ).strftime("%Y/%m/%d %H:%M"),
         })
@@ -266,7 +291,7 @@ def allocate_threads(result_df, experts_count, sla_hours, efficiency, upload_tim
 # ---------- UI FLOW ----------
 if uploaded_file:
     try:
-        # ✅ زمان آپلود واقعی (timezone-aware)
+        # زمان آپلود واقعی (timezone-aware) و ثابت تا وقتی فایل عوض نشه
         file_bytes = uploaded_file.getvalue()
         file_hash = hashlib.md5(file_bytes).hexdigest()
 
@@ -305,7 +330,7 @@ if uploaded_file:
         if err:
             st.error(err)
         else:
-            # ✅ شمارنده‌های کل
+            # شمارنده‌های کل
             total_threads = len(result_df)
             total_unread_msgs = int(result_df["UnreadCount"].sum())
 
@@ -320,7 +345,7 @@ if uploaded_file:
             show_summary = result_df.drop(columns=["WorkHoursRaw", "OldestUnreadDT"])
             st.dataframe(show_summary, use_container_width=True)
 
-            st.subheader("تقسیم پیام‌ها بین کارشناسان")
+            st.subheader("تقسیم پیام‌ها بین کارشناسان (فقط اکانت‌ها)")
             alloc_df, feasible, overall_finish, total_work = allocate_threads(
                 result_df, experts_count, sla_hours, efficiency, upload_time
             )
@@ -339,6 +364,7 @@ if uploaded_file:
             st.dataframe(alloc_df, use_container_width=True)
             st.caption(f"پایان کل بک‌لاگ: {overall_finish.astimezone(APP_TZ).strftime('%Y/%m/%d %H:%M')}")
 
+            # دانلود خروجی‌ها
             output = BytesIO()
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
                 show_summary.to_excel(writer, index=False, sheet_name="ThreadSummary")
