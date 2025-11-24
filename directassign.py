@@ -235,25 +235,43 @@ def process_file(df, upload_time, mapped_cols):
     return result_df, None
 
 
-def allocate_threads(result_df, experts_count, sla_hours, efficiency, upload_time):
+def allocate_accounts(result_df, experts_count, sla_hours, efficiency, upload_time):
     """
-    تقسیم تردها بین کارشناسا (گرِیدی روی کمترین لود)
-    ولی خروجی فقط Account ها رو نمایش می‌ده.
+    ✅ تقسیم Account-based:
+    - هر Account فقط به یک کارشناس می‌رسه (حداکثر)
+    - ورک‌لود هر Account = جمع ورک‌لود تردهای آن
+    - اولویت: قدیمی‌ترین ترد (OldestUnreadDT) سپس unread بیشتر
+    - تخصیص گرِیدی روی کمترین لود کارشناس
     """
-    work_df = result_df.copy().sort_values(
-        by=["OldestUnreadDT", "UnreadCount"],
-        ascending=[True, False]
-    ).reset_index(drop=True)
+    # تجمیع به ازای Account
+    acc_df = (
+        result_df.groupby("Account", as_index=False)
+        .agg(
+            AccountWorkHours=("WorkHoursRaw", "sum"),
+            AccountThreadCount=("ThreadKey", "size"),
+            AccountUnreadMsgs=("UnreadCount", "sum"),
+            OldestAccountDT=("OldestUnreadDT", "min"),
+        )
+        .sort_values(
+            by=["OldestAccountDT", "AccountUnreadMsgs"],
+            ascending=[True, False]
+        )
+        .reset_index(drop=True)
+    )
 
     loads = [0.0 for _ in range(experts_count)]
-    assigns_threads = [[] for _ in range(experts_count)]  # thread_key
+    assigns_accounts = [[] for _ in range(experts_count)]
+    assigns_thread_counts = [0 for _ in range(experts_count)]
+    assigns_unread_msgs = [0 for _ in range(experts_count)]
 
-    for _, row in work_df.iterrows():
+    for _, row in acc_df.iterrows():
         idx = loads.index(min(loads))
-        assigns_threads[idx].append(row["ThreadKey"])
-        loads[idx] += float(row["WorkHoursRaw"])
+        assigns_accounts[idx].append(row["Account"])
+        loads[idx] += float(row["AccountWorkHours"])
+        assigns_thread_counts[idx] += int(row["AccountThreadCount"])
+        assigns_unread_msgs[idx] += int(row["AccountUnreadMsgs"])
 
-    total_work_raw = work_df["WorkHoursRaw"].sum()
+    total_work_raw = acc_df["AccountWorkHours"].sum()
     feasible = total_work_raw <= experts_count * sla_hours * efficiency
 
     out_rows = []
@@ -266,18 +284,12 @@ def allocate_threads(result_df, experts_count, sla_hours, efficiency, upload_tim
 
         finish_time = upload_time + timedelta(hours=duration_hours)
 
-        # فقط Account ها از ThreadKey
-        accounts = []
-        for tk in assigns_threads[i]:
-            acc = str(tk).split("|")[0].strip()
-            if acc and acc not in accounts:
-                accounts.append(acc)
-
         out_rows.append({
             "Expert": f"کارشناس {i+1}",
-            "AssignedAccounts": " , ".join(accounts) if accounts else "-",
-            "AssignedAccountCount": len(accounts),
-            "AssignedThreadCount": len(assigns_threads[i]),  # برای اطلاع، حذفش نکنیم
+            "AssignedAccounts": " , ".join(assigns_accounts[i]) if assigns_accounts[i] else "-",
+            "AssignedAccountCount": len(assigns_accounts[i]),
+            "AssignedThreadCount": assigns_thread_counts[i],
+            "AssignedUnreadMsgs": assigns_unread_msgs[i],
             "WorkHours": round(expert_hours_raw, 2),
             "FinishBy": finish_time.astimezone(APP_TZ).strftime("%Y/%m/%d %H:%M"),
         })
@@ -291,7 +303,7 @@ def allocate_threads(result_df, experts_count, sla_hours, efficiency, upload_tim
 # ---------- UI FLOW ----------
 if uploaded_file:
     try:
-        # زمان آپلود واقعی (timezone-aware) و ثابت تا وقتی فایل عوض نشه
+        # زمان آپلود واقعی و ثابت تا وقتی فایل عوض نشه
         file_bytes = uploaded_file.getvalue()
         file_hash = hashlib.md5(file_bytes).hexdigest()
 
@@ -330,12 +342,10 @@ if uploaded_file:
         if err:
             st.error(err)
         else:
-            # شمارنده‌های کل
             total_threads = len(result_df)
             total_unread_msgs = int(result_df["UnreadCount"].sum())
 
             st.subheader("خلاصه پیام‌های خوانده‌نشده")
-
             c1, c2 = st.columns(2)
             with c1:
                 st.metric("تعداد کل تردهای خوانده‌نشده", total_threads)
@@ -345,8 +355,8 @@ if uploaded_file:
             show_summary = result_df.drop(columns=["WorkHoursRaw", "OldestUnreadDT"])
             st.dataframe(show_summary, use_container_width=True)
 
-            st.subheader("تقسیم پیام‌ها بین کارشناسان (فقط اکانت‌ها)")
-            alloc_df, feasible, overall_finish, total_work = allocate_threads(
+            st.subheader("تقسیم بین کارشناسان (Account-based / هر اکانت فقط یک کارشناس)")
+            alloc_df, feasible, overall_finish, total_work = allocate_accounts(
                 result_df, experts_count, sla_hours, efficiency, upload_time
             )
 
